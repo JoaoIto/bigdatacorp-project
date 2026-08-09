@@ -1,0 +1,7 @@
+{"club_id":"OK1","name":"Clube Válido","championship":"SERIE A","founding_date":"2020-01-01","city":"Test","state":"TS","country":"Brasil","stadium":"Arena","president":"Pres","nickname":"Nick","colors":["azul"],"titles":0,"players":[]}
+{linha com json quebrado
+["isso", "é", "uma", "lista", "não", "um", "dict"]
+
+   
+{"club_id":"OK2","name":"Segundo Clube Válido","championship":"SERIE B","founding_date":"2021-05-10","city":"Test2","state":"T2","country":"Brasil","stadium":"Arena2","president":"Pres2","nickname":null,"colors":[],"titles":0,"players":[{"player_id":"OK2-1","name":"Jogador","age":20,"goals":3,"debut_date":"2023-01-01","position":"Atacante","shirt_number":7,"nationality":"Brasil","market_value":100}]}
+42
