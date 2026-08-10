@@ -14,9 +14,11 @@ Uso:
 Referência arquitetural: spec/architecture.md §2 e §3
 """
 
+import json
 import logging
 import os
 import sys
+from typing import Any, Dict
 
 from reader import read_jsonl
 from transformer import (
@@ -36,25 +38,42 @@ from writer import create_csv_writer
 logger = logging.getLogger("bigdatacorp")
 
 
-def setup_logging():
-    """Configura o sistema de logging com formato padronizado.
+class JsonFormatter(logging.Formatter):
+    """Formatter customizado nativo para serializar logs em JSON (ADR-006)."""
+    def format(self, record: logging.LogRecord) -> str:
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        return json.dumps(log_record)
+
+
+def setup_logging() -> None:
+    """Configura o sistema de logging com formato JSON nativo para Cloud.
 
     Nível INFO para o fluxo normal (início, fim, contadores).
     Nível WARNING para registros ignorados (JSON malformado, tipo errado).
     Nível ERROR para falhas de infraestrutura (arquivo não encontrado, I/O).
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S")
+    handler.setFormatter(formatter)
+    
+    # Evita adicionar handlers duplicados ao chamar múltiplas vezes (ex: em testes)
+    if logging.root.hasHandlers():
+        logging.root.handlers.clear()
+        
+    logging.root.addHandler(handler)
+    logging.root.setLevel(logging.INFO)
 
 
 # ──────────────────────────────────────────────────────────────
 # Pipeline Principal
 # ──────────────────────────────────────────────────────────────
 
-def process(input_path, output_dir):
+def process(input_path: str, output_dir: str) -> Dict[str, int]:
     """Executa o pipeline completo de processamento JSONL → CSV.
 
     Fluxo para cada registro:
@@ -136,7 +155,7 @@ def process(input_path, output_dir):
     return stats
 
 
-def print_report(stats):
+def print_report(stats: Dict[str, int]) -> None:
     """Exibe o relatório final de processamento no console.
 
     Args:
@@ -158,7 +177,7 @@ def print_report(stats):
 # Ponto de Entrada CLI
 # ──────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     """Ponto de entrada do programa.
 
     Uso:

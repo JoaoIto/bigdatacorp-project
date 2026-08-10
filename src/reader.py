@@ -10,11 +10,14 @@ Decisão arquitetural: spec/decisions.md ADR-002 (Erros de Estrutura)
 
 import json
 import logging
+from typing import Any, Dict, Generator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def read_jsonl(filepath, stats=None):
+def read_jsonl(
+    filepath: str, stats: Optional[Dict[str, int]] = None
+) -> Generator[Tuple[int, Dict[str, Any]], None, None]:
     """Generator que lê um arquivo JSONL linha a linha com tolerância a falhas.
 
     Faz yield de tuplas (line_number, record) para cada linha que contenha
@@ -57,7 +60,7 @@ def read_jsonl(filepath, stats=None):
     stats.setdefault('linhas_vazias', 0)
     stats.setdefault('linhas_json_invalido', 0)
 
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
         for line_number, raw_line in enumerate(f, start=1):
             stats['linhas_lidas'] += 1
 

@@ -20,6 +20,7 @@ Referências:
 """
 
 from datetime import datetime
+from typing import Any, Dict, List
 
 # ──────────────────────────────────────────────────────────────
 # Constantes
@@ -64,7 +65,7 @@ PLAYERS_HEADER = [
 # Funções auxiliares de validação e formatação
 # ──────────────────────────────────────────────────────────────
 
-def is_valid_championship(record):
+def is_valid_championship(record: Dict[str, Any]) -> bool:
     """Verifica se o clube pertence à Série A ou Série B (RN01).
 
     A comparação é case-insensitive e tolerante a espaços extras.
@@ -98,7 +99,7 @@ def is_valid_championship(record):
     return normalized in VALID_CHAMPIONSHIPS
 
 
-def safe_str(record, key):
+def safe_str(record: Dict[str, Any], key: str) -> str:
     """Extrai um campo do dict com fallback seguro para string vazia (RN05).
 
     Se a chave estiver ausente ou o valor for None, retorna "".
@@ -127,7 +128,7 @@ def safe_str(record, key):
     return str(value)
 
 
-def format_date(value):
+def format_date(value: Any) -> str:
     """Valida e formata uma data para o padrão yyyy-MM-dd (RN04).
 
     Tenta parsear o valor em múltiplos formatos conhecidos.
@@ -173,7 +174,7 @@ def format_date(value):
     return ""
 
 
-def format_colors(colors):
+def format_colors(colors: Any) -> str:
     """Une uma lista de cores em um campo separado por pipe '|' (RN03).
 
     Exemplos de transformação:
@@ -215,7 +216,7 @@ def format_colors(colors):
 # Funções de transformação (mapeamento JSON → CSV row)
 # ──────────────────────────────────────────────────────────────
 
-def transform_club(record):
+def transform_club(record: Dict[str, Any]) -> List[str]:
     """Transforma um dict de clube em uma row para clubs.csv.
 
     Aplica todas as regras de formatação (datas, cores, campos nulos)
@@ -244,7 +245,7 @@ def transform_club(record):
     ]
 
 
-def transform_player(club_id, player):
+def transform_player(club_id: str, player: Dict[str, Any]) -> List[str]:
     """Transforma um dict de jogador em uma row para players.csv.
 
     O club_id é recebido do clube pai para estabelecer a relação 1:N.
