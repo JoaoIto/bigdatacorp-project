@@ -20,3 +20,4 @@ Thumbs.db
 
 # Output gerado pelo programa
 data/output/
+mass_data.jsonl

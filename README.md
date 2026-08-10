@@ -1,95 +1,75 @@
 # ⚽ Processador Batch — Clubes de Futebol (BigDataCorp)
 
-Processador de dados em lote que transforma um arquivo JSONL de clubes de futebol em arquivos CSV relacionais, com **streaming O(1)**, **tolerância a falhas** e **compliance RFC 4180**.
+Sistema robusto de processamento em lote (batch processing) construído puramente em Python (Standard Library). Ele transforma arquivos JSONL massivos contendo clubes de futebol e jogadores em arquivos CSV relacionais (1:1 e 1:N), garantindo **complexidade espacial O(1)** e **compliance com RFC 4180**.
 
 ---
 
-## Visão Geral
+## 🚀 Como Executar
 
-O programa lê um arquivo JSONL onde cada linha é um objeto JSON representando um clube de futebol com seus jogadores, e gera dois arquivos CSV:
-
-| Arquivo         | Relação | Descrição                            |
-|-----------------|---------|--------------------------------------|
-| `clubs.csv`     | 1:1     | Um registro por clube                |
-| `players.csv`   | 1:N     | Um registro por jogador de cada clube|
-
-## Pré-requisitos
-
-- **Python 3.8+** (sem dependências externas — usa somente a biblioteca padrão)
-
-## Como Executar
+O programa requer que o caminho do arquivo JSONL de entrada seja passado via parâmetro de linha de comando.
 
 ```bash
-# Uso básico (CSVs gerados no mesmo diretório do arquivo de entrada)
-python src/main.py <caminho_arquivo_entrada.jsonl>
+# Execução básica (CSVs são gerados na mesma pasta do arquivo de entrada)
+python src/main.py data/input/sample_clubes.jsonl
 
-# Com diretório de saída explícito
-python src/main.py <caminho_arquivo_entrada.jsonl> <diretório_saída>
-```
-
-### Exemplo com o arquivo de amostra
-
-```bash
-# A partir do diretório /project
+# Execução com diretório de saída explícito
 python src/main.py data/input/sample_clubes.jsonl data/output
 ```
 
-## Estrutura do Projeto
+**Pré-requisitos:** Python 3.8+ (zero dependências externas para rodar o pipeline principal).
 
-```
-project/
-├── src/                          # Código-fonte
-│   ├── main.py                   # Ponto de entrada CLI + orquestrador
-│   ├── reader.py                 # Leitor JSONL em streaming (generator)
-│   └── writer.py                 # Escritor CSV (RFC 4180)
-├── tests/                        # Testes
-│   └── dirty_data.jsonl          # Fixture: dados malformados para teste
-├── data/
-│   ├── input/                    # Arquivos JSONL de entrada
-│   │   └── sample_clubes.jsonl   # Amostra fornecida no desafio
-│   └── output/                   # CSVs gerados pelo programa
-├── .gitignore
-└── README.md                     # Este arquivo
-```
+---
 
-## Arquitetura
+## 🧪 Engenharia de Qualidade
 
-O sistema segue o padrão **Pipes & Filters** com **Generators** do Python para streaming:
+Para garantir a qualidade, resiliência e corretude do código, uma suite de testes foi implementada usando `pytest`. 
 
-```
-JSONL  ──▶  Reader (yield)  ──▶  Transformer  ──▶  Writer (csv)
- O(1)          O(1)                O(1)              O(1)
+**Para rodar a suite completa de testes:**
+```bash
+# Instale o pytest
+pip install pytest
+
+# Execute a suite a partir da raiz (/project)
+$env:PYTHONPATH="src"
+python -m pytest tests/
 ```
 
-- **Reader** (`reader.py`): Generator que lê o JSONL linha a linha com `json.loads()`. Três níveis de defesa contra dados sujos (linhas vazias, JSON malformado, tipo inesperado).
-- **Writer** (`writer.py`): Wrapper sobre `csv.writer` com compliance RFC 4180 nativa (escape de vírgulas, aspas, quebras de linha).
-- **Main** (`main.py`): Orquestrador que compõe o pipeline, gerencia ciclo de vida de arquivos e emite relatório final com contadores.
+### O que está sendo testado?
+- `test_transformer.py`: Testes unitários focados em *edge cases* das funções de regras de negócio (case-insensitivity, nulos, datas malformadas).
+- `test_pipeline.py`: Teste de integração end-to-end usando fixtures em memória para garantir contadores corretos e CSVs validados.
+- `test_resilience.py`: **Chaos Testing** injetando payloads JSON severamente corrompidos, strings vazias, e tipos errados, para provar que o pipeline falha graciosamente (*fails gracefully*) e não lança exceções não tratadas (não aborta).
 
-### Decisões Técnicas
+---
 
-| Decisão                        | Escolha                        | Motivo                                    |
-|--------------------------------|--------------------------------|-------------------------------------------|
-| Dependências                   | Somente stdlib                 | Zero setup, portabilidade máxima          |
-| Memória                        | Streaming O(1) via generators  | Suporta milhões de registros              |
-| CSV                            | `csv.writer` (C-bindings)      | RFC 4180 nativo, performático             |
-| Tolerância a falhas            | `try/except` por registro      | Registros ruins são ignorados, pipeline segue |
-| Logging                        | `logging` nativo               | Níveis INFO/WARNING/ERROR sem `print()`   |
+## 📈 Prova de Performance O(1)
 
-> Para documentação detalhada de arquitetura e decisões, consulte o repositório de especificações em `/spec`.
+A arquitetura de *Streaming* foi construída para suportar arquivos do tamanho do disco, utilizando pouquíssima memória RAM. Para provar matematicamente essa premissa:
 
-## Regras de Negócio
+**1. Gere um arquivo JSONL colossal (1 milhão de registros):**
+```bash
+python scripts/generate_mass_data.py
+# Aguarde a geração do arquivo mass_data.jsonl (~260MB)
+```
 
-- **Filtro por campeonato:** Somente clubes da Série A ou Série B
-- **Cores:** Lista unida por `|` (pipe). Ex: `["preto","branco"]` → `preto|branco`
-- **Datas:** Formato `yyyy-MM-dd`. Data inválida → campo vazio
-- **Campos nulos/ausentes:** Viram campo vazio no CSV
-- **Robustez:** Registros malformados são ignorados com log — programa nunca aborta
+**2. Rode o Profiler de Memória:**
+```bash
+python scripts/profile_memory.py
+```
+O script usará a biblioteca nativa `tracemalloc` para medir o **Pico de Memória RAM** do pipeline durante o processamento de 1.000.000 de linhas. O resultado comprovará que o uso da RAM será de poucos Megabytes e constante (O(1)), independentemente do tamanho do arquivo.
 
-## Saída Esperada (Amostra)
+---
 
-Ao processar `sample_clubes.jsonl`:
+## 🏗️ Decisões de Arquitetura
 
-- `clubs.csv`: **5 clubes** (SCCP, SEP, SFC, CRU, AVA)
-- `players.csv`: **8 jogadores** (3 + 2 + 2 + 1)
-- NAC filtrado (campeonato `SEM CAMPEONATO`)
-- AVA sem jogadores → aparece em `clubs.csv`, nenhuma linha em `players.csv`
+O sistema foi desenhado para atuar em ambientes hostis de dados (Big Data). Destaque para as três principais pilares:
+
+### 1. Complexidade de Espaço O(1)
+Em vez de carregar listas inteiras na memória, o `src/reader.py` é um **Generator** que aplica lazy evaluation usando `yield`. O arquivo é lido linha a linha e descartado. O uso de memória é limitado estritamente ao tamanho da maior linha do arquivo ($O(M)$), garantindo que um arquivo de 10GB consumirá a mesma memória que um de 10MB.
+
+### 2. Resiliência a Falhas (Fail Gracefully)
+Frente a dados de terceiros, a chance de encontrar anomalias é de 100%. O sistema abraça a falha implementando blocos defensivos em múltiplas camadas. Registros com estrutura JSON quebrada, nulos não mapeados ou tipos inesperados são logados como `WARNING` e descartados ou omitidos nos campos finais. **O pipeline nunca aborta no meio.**
+
+### 3. Compliance Estrito RFC 4180
+Criar CSVs manualmente via manipulação de string (`",".join()`) é frágil quando dados contêm vírgulas e aspas internas (como `Pedro Lourenço, Filho`). Por isso, usamos o módulo `csv` nativo do Python (bindings em C) configurado com `newline=''` para lidar automaticamente com double quoting, delimiter escaping e quebras de linha `CRLF` (Windows/Unix safety).
+
+> A documentação aprofundada de requisitos, logs da Inteligência Artificial par (Auditoria) e o diário de ADRs (Architecture Decision Records) residem fora do repositório de código, na pasta `/spec`.
