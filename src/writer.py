@@ -14,12 +14,13 @@ Decisão arquitetural: spec/decisions.md ADR-001 (RFC 4180 via csv nativo)
 
 import csv
 import logging
+from typing import Any, List, TextIO, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 
-def create_csv_writer(filepath, header):
+def create_csv_writer(filepath: str, header: List[str]) -> Tuple[TextIO, Any]:
     """Cria um arquivo CSV e retorna o handle e o writer configurado.
 
     O writer é configurado com o dialect padrão 'excel' do Python, que
