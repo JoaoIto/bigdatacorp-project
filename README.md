@@ -20,6 +20,25 @@ python src/main.py data/input/sample_clubes.jsonl data/output
 
 ---
 
+## 🐳 Como Executar via Docker (Produção)
+
+O projeto está pronto para a nuvem. O container age nativamente como uma CLI (Command-Line Interface).
+
+**1. Construa a Imagem:**
+```bash
+docker build -t bigdatacorp-processor .
+```
+
+**2. Execute passando volumes:**
+Como o container tem um File System isolado, é necessário mapear o volume (`-v`) onde seus dados de entrada estão e onde os arquivos de saída devem ser salvos.
+
+```bash
+# Mapeia a pasta local /data para o container e passa os parâmetros
+docker run --rm -v "$(pwd)/data:/app/data" bigdatacorp-processor data/input/sample_clubes.jsonl data/output
+```
+
+---
+
 ## 🧪 Engenharia de Qualidade
 
 Para garantir a qualidade, resiliência e corretude do código, uma suite de testes foi implementada usando `pytest`. 
