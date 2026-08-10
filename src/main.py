@@ -4,8 +4,8 @@ main.py — Orquestrador do pipeline de processamento batch.
 Ponto de entrada do programa. Responsabilidades:
 - Parse de argumentos CLI (caminho do arquivo de entrada e diretório de saída)
 - Configuração do sistema de logging
-- Composição e execução do pipeline: Reader → Writer
-- Gerenciamento do ciclo de vida dos arquivos (open/close via context manager)
+- Composição e execução do pipeline: Reader → Transformer → Writer
+- Gerenciamento do ciclo de vida dos arquivos (open/close)
 - Contadores e relatório final de processamento
 
 Uso:
@@ -19,7 +19,15 @@ import os
 import sys
 
 from reader import read_jsonl
-from writer import CLUBS_HEADER, PLAYERS_HEADER, create_csv_writer
+from transformer import (
+    CLUBS_HEADER,
+    PLAYERS_HEADER,
+    is_valid_championship,
+    safe_str,
+    transform_club,
+    transform_player,
+)
+from writer import create_csv_writer
 
 # ──────────────────────────────────────────────────────────────
 # Configuração de Logging
@@ -43,99 +51,17 @@ def setup_logging():
 
 
 # ──────────────────────────────────────────────────────────────
-# Extração bruta de campos (sem regras de negócio)
-#
-# Nesta fase (Core I/O), fazemos apenas extração direta dos
-# campos do JSON para provar que o pipeline funciona end-to-end.
-# As transformações (datas, cores, filtro) virão na Fase 3.
-# ──────────────────────────────────────────────────────────────
-
-def safe_get(record, key, default=""):
-    """Extrai um valor do dict com fallback seguro.
-
-    Retorna o valor como string se presente e não-None.
-    Retorna default se a chave estiver ausente ou o valor for None.
-
-    Args:
-        record (dict): O dicionário fonte.
-        key (str): A chave a buscar.
-        default (str): Valor padrão se ausente ou None.
-
-    Returns:
-        str: O valor extraído como string, ou default.
-    """
-    value = record.get(key)
-    if value is None:
-        return default
-    return str(value)
-
-
-def extract_club_row(record):
-    """Extrai os campos do clube como uma lista de strings (sem formatação).
-
-    Nesta fase, os campos são extraídos diretamente — sem formatação
-    de datas, sem junção de cores com pipe, sem filtro de campeonato.
-    Esses tratamentos serão adicionados no módulo transformer.py (Fase 3).
-
-    Args:
-        record (dict): O dict de um clube parseado do JSONL.
-
-    Returns:
-        list[str]: Lista de 11 strings na ordem do cabeçalho de clubs.csv.
-    """
-    # colors: converte lista para representação bruta por enquanto
-    colors = record.get('colors')
-    if isinstance(colors, list):
-        colors_str = str(colors)
-    else:
-        colors_str = safe_get(record, 'colors')
-
-    return [
-        safe_get(record, 'club_id'),
-        safe_get(record, 'name'),
-        safe_get(record, 'championship'),
-        safe_get(record, 'founding_date'),
-        safe_get(record, 'city'),
-        safe_get(record, 'state'),
-        safe_get(record, 'country'),
-        safe_get(record, 'stadium'),
-        safe_get(record, 'president'),
-        safe_get(record, 'nickname'),
-        colors_str,
-    ]
-
-
-def extract_player_row(club_id, player):
-    """Extrai os campos de um jogador como uma lista de strings (sem formatação).
-
-    Args:
-        club_id (str): O club_id do clube pai.
-        player (dict): O dict de um jogador do array 'players'.
-
-    Returns:
-        list[str]: Lista de 8 strings na ordem do cabeçalho de players.csv.
-    """
-    return [
-        club_id,
-        safe_get(player, 'player_id'),
-        safe_get(player, 'name'),
-        safe_get(player, 'age'),
-        safe_get(player, 'goals'),
-        safe_get(player, 'debut_date'),
-        safe_get(player, 'position'),
-        safe_get(player, 'shirt_number'),
-    ]
-
-
-# ──────────────────────────────────────────────────────────────
 # Pipeline Principal
 # ──────────────────────────────────────────────────────────────
 
 def process(input_path, output_dir):
     """Executa o pipeline completo de processamento JSONL → CSV.
 
-    Lê o arquivo JSONL em streaming (O(1) de memória), extrai os
-    campos de cada registro e escreve imediatamente nos CSVs.
+    Fluxo para cada registro:
+      1. Reader (generator) produz dicts válidos do JSONL.
+      2. Filtro de campeonato (RN01): descarta clubes fora da Série A/B.
+      3. Transformer: aplica regras de negócio (datas, cores, campos nulos).
+      4. Writer: escreve imediatamente nos CSVs (streaming O(1)).
 
     Args:
         input_path (str): Caminho para o arquivo JSONL de entrada.
@@ -144,8 +70,8 @@ def process(input_path, output_dir):
     Returns:
         dict: Dicionário com os contadores de processamento.
     """
-    clubs_path = os.path.join(output_dir, 'clubs.csv')
-    players_path = os.path.join(output_dir, 'players.csv')
+    clubs_path = os.path.join(output_dir, "clubs.csv")
+    players_path = os.path.join(output_dir, "players.csv")
 
     logger.info("Iniciando processamento...")
     logger.info("  Entrada:  %s", input_path)
@@ -153,12 +79,13 @@ def process(input_path, output_dir):
 
     # Contadores compartilhados com o reader (via dict mutável)
     stats = {
-        'linhas_lidas': 0,
-        'linhas_vazias': 0,
-        'linhas_json_invalido': 0,
-        'clubes_escritos': 0,
-        'jogadores_escritos': 0,
-        'erros_processamento': 0,
+        "linhas_lidas": 0,
+        "linhas_vazias": 0,
+        "linhas_json_invalido": 0,
+        "clubes_filtrados": 0,
+        "clubes_escritos": 0,
+        "jogadores_escritos": 0,
+        "erros_processamento": 0,
     }
 
     # Abre os dois arquivos de saída
@@ -166,24 +93,29 @@ def process(input_path, output_dir):
     players_fh, players_writer = create_csv_writer(players_path, PLAYERS_HEADER)
 
     try:
-        # Pipeline: Reader (generator) → processamento → Writer
+        # Pipeline: Reader (generator) → Filter → Transform → Writer
         for line_number, record in read_jsonl(input_path, stats):
             try:
-                # ── Extrair e escrever o clube ──
-                club_row = extract_club_row(record)
-                clubs_writer.writerow(club_row)
-                stats['clubes_escritos'] += 1
+                # ── RN01: Filtro por campeonato ──
+                if not is_valid_championship(record):
+                    stats["clubes_filtrados"] += 1
+                    continue
 
-                # ── Extrair e escrever cada jogador (1:N) ──
-                club_id = safe_get(record, 'club_id')
-                players = record.get('players')
+                # ── Transformar e escrever o clube (1:1) ──
+                club_row = transform_club(record)
+                clubs_writer.writerow(club_row)
+                stats["clubes_escritos"] += 1
+
+                # ── Transformar e escrever cada jogador (1:N) ──
+                club_id = safe_str(record, "club_id")
+                players = record.get("players")
 
                 if isinstance(players, list):
                     for player in players:
                         if isinstance(player, dict):
-                            player_row = extract_player_row(club_id, player)
+                            player_row = transform_player(club_id, player)
                             players_writer.writerow(player_row)
-                            stats['jogadores_escritos'] += 1
+                            stats["jogadores_escritos"] += 1
 
             except Exception as e:
                 # Tolerância a falhas: erro em um registro não aborta o pipeline
@@ -193,7 +125,7 @@ def process(input_path, output_dir):
                     type(e).__name__,
                     e,
                 )
-                stats['erros_processamento'] += 1
+                stats["erros_processamento"] += 1
                 continue
 
     finally:
@@ -212,12 +144,13 @@ def print_report(stats):
     """
     logger.info("=" * 50)
     logger.info("Processamento concluído com sucesso.")
-    logger.info("  Linhas lidas:              %d", stats.get('linhas_lidas', 0))
-    logger.info("  Linhas vazias ignoradas:   %d", stats.get('linhas_vazias', 0))
-    logger.info("  Linhas JSON inválido:      %d", stats.get('linhas_json_invalido', 0))
-    logger.info("  Erros de processamento:    %d", stats.get('erros_processamento', 0))
-    logger.info("  Clubes escritos:           %d", stats.get('clubes_escritos', 0))
-    logger.info("  Jogadores escritos:        %d", stats.get('jogadores_escritos', 0))
+    logger.info("  Linhas lidas:              %d", stats.get("linhas_lidas", 0))
+    logger.info("  Linhas vazias ignoradas:   %d", stats.get("linhas_vazias", 0))
+    logger.info("  Linhas JSON inválido:      %d", stats.get("linhas_json_invalido", 0))
+    logger.info("  Clubes filtrados:          %d", stats.get("clubes_filtrados", 0))
+    logger.info("  Erros de processamento:    %d", stats.get("erros_processamento", 0))
+    logger.info("  Clubes escritos:           %d", stats.get("clubes_escritos", 0))
+    logger.info("  Jogadores escritos:        %d", stats.get("jogadores_escritos", 0))
     logger.info("=" * 50)
 
 
@@ -274,5 +207,5 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

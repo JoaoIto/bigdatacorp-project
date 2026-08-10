@@ -17,35 +17,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────
-# Constantes de cabeçalho — nomes em português, na ordem exata
-# exigida pelo enunciado (incluindo acentos e espaços).
-# ──────────────────────────────────────────────────────────────
-
-CLUBS_HEADER = [
-    "Id do Clube",
-    "Nome",
-    "Campeonato",
-    "Data de Fundação",
-    "Cidade",
-    "Estado",
-    "País",
-    "Estádio",
-    "Presidente",
-    "Apelido",
-    "Cores",
-]
-
-PLAYERS_HEADER = [
-    "Id do Clube",
-    "Id do Jogador",
-    "Nome",
-    "Idade",
-    "Gols",
-    "Data de Estreia",
-    "Posição",
-    "Número da Camisa",
-]
 
 
 def create_csv_writer(filepath, header):
