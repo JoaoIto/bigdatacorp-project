@@ -4,6 +4,7 @@ from src.transformer import (
     safe_str,
     format_date,
     format_colors,
+    _format_colors_cached,
 )
 
 class TestTransformer:
@@ -60,3 +61,16 @@ class TestTransformer:
         assert format_colors("vermelho") == "" # Espera lista, não string
         assert format_colors(["azul", None, "branco"]) == "azul|branco"
         assert format_colors([1, 2]) == "1|2" # Coerce pra string
+
+        # Validar o comportamento do @lru_cache convertendo para tupla
+        _format_colors_cached.cache_clear()
+        
+        format_colors(["amarelo", "preto"])
+        info = _format_colors_cached.cache_info()
+        assert info.misses == 1
+        assert info.hits == 0
+        
+        # Chama a mesma combinação, deve usar o cache
+        format_colors(["amarelo", "preto"])
+        info = _format_colors_cached.cache_info()
+        assert info.hits == 1
