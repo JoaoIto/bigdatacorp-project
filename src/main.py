@@ -77,7 +77,7 @@ class ThreadSafeStats(Dict[str, int]):
         with self.lock:
             super().__setitem__(key, value)
             
-    def setdefault(self, key: str, default: Optional[int] = None) -> int:
+    def setdefault(self, key: str, default: int = 0) -> int:
         with self.lock:
             return super().setdefault(key, default)
 
