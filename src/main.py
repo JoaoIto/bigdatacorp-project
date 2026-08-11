@@ -18,7 +18,9 @@ import gc
 import json
 import logging
 import os
+import shutil
 import sys
+import uuid
 from typing import Any, Dict, IO, Optional
 
 from reader import read_jsonl, IO_BUFFER_SIZE
@@ -70,6 +72,21 @@ def setup_logging() -> None:
     logging.root.setLevel(logging.INFO)
 
 
+def sanitize_workspace(output_dir: str) -> None:
+    """Limpa resíduos de execuções mortas (Bootstrap Sanitization - OOMKilled)."""
+    if not os.path.exists(output_dir):
+        return
+        
+    for item in os.listdir(output_dir):
+        item_path = os.path.join(output_dir, item)
+        if os.path.isfile(item_path) and item.endswith(".tmp"):
+            os.remove(item_path)
+            logger.info("Bootstrap Sanitization: Removido arquivo residual %s", item)
+        elif os.path.isdir(item_path) and item.startswith(".tmp_run_"):
+            shutil.rmtree(item_path)
+            logger.info("Bootstrap Sanitization: Removido diretório residual %s", item)
+
+
 # ──────────────────────────────────────────────────────────────
 # Pipeline Principal
 # ──────────────────────────────────────────────────────────────
@@ -101,10 +118,15 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
     players_path = os.path.join(output_dir, "players.csv")
     dlq_path = os.path.join(output_dir, "dlq_errors.txt")
 
-    # Arquivos temporários para idempotência (escritas atômicas)
-    clubs_tmp = clubs_path + ".tmp"
-    players_tmp = players_path + ".tmp"
-    dlq_tmp = dlq_path + ".tmp"
+    # Diretório temporário exclusivo da execução (Direct-to-Directory Promotion)
+    run_uuid = uuid.uuid4().hex
+    tmp_run_dir = os.path.join(output_dir, f".tmp_run_{run_uuid}")
+    os.makedirs(tmp_run_dir, exist_ok=True)
+    
+    # Arquivos temporários para idempotência
+    clubs_tmp = os.path.join(tmp_run_dir, "clubs.csv")
+    players_tmp = os.path.join(tmp_run_dir, "players.csv")
+    dlq_tmp = os.path.join(tmp_run_dir, "dlq_errors.txt")
 
     logger.info("Iniciando processamento...")
     logger.info("  Entrada:  %s", input_path)
@@ -205,19 +227,19 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
         if dlq_fh is not None:
             dlq_fh.close()
             
-        # ── Idempotência: Escritas Atômicas ──
-        # Se sucesso, move os arquivos .tmp para o destino final (overwrites)
+        # ── Idempotência: Escritas Atômicas Multi-Arquivo ──
         if commit_success:
-            os.replace(clubs_tmp, clubs_path)
-            os.replace(players_tmp, players_path)
-            # Se a DLQ estiver vazia (zero erros), podemos mantê-la vazia ou apenas renomear
+            # Em caso de sucesso, move os arquivos do diretório temporário para a pasta final
+            if os.path.exists(clubs_tmp):
+                os.replace(clubs_tmp, clubs_path)
+            if os.path.exists(players_tmp):
+                os.replace(players_tmp, players_path)
             if os.path.exists(dlq_tmp):
                 os.replace(dlq_tmp, dlq_path)
-        else:
-            # Em caso de aborto (ex: kill ou exception grave), deleta o lixo
-            for tmp_file in (clubs_tmp, players_tmp, dlq_tmp):
-                if os.path.exists(tmp_file):
-                    os.remove(tmp_file)
+                
+        # Independentemente do resultado (sucesso ou aborto), apaga o diretório temporário
+        if os.path.exists(tmp_run_dir):
+            shutil.rmtree(tmp_run_dir)
 
     return stats
 
@@ -280,6 +302,9 @@ def main() -> None:
 
     # Cria o diretório de saída se não existir
     os.makedirs(output_dir, exist_ok=True)
+    
+    # ── Bootstrap Sanitization ──
+    sanitize_workspace(output_dir)
 
     # ── Execução do pipeline ──
     try:

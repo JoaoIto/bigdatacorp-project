@@ -106,15 +106,20 @@ O GC geracional do CPython é **desativado** antes do processamento (`gc.disable
 ### 3. Micro-otimizações de Bytecode (Local Variable Aliasing)
 Para o hot-loop que processa milhões de registros, foi implementado o aliasing de funções globais ou de instância para variáveis locais (ex: `_parse_json = json.loads`). Isso força a máquina virtual do CPython (eval loop) a usar a instrução otimizada `LOAD_FAST` ao invés da custosa `LOAD_ATTR`, removendo a sobrecarga de lookup de atributos de dicionários em cada iteração. Adicionalmente, funções de conversão de dados massivamente repetitivas utilizam `@lru_cache` para evitar recomputação contínua.
 
-### 4. Dead Letter Queue (DLQ) — Auditoria de Dados
-Linhas rejeitadas (JSON malformado, tipo inesperado) **não são mais descartadas silenciosamente**. Elas são gravadas no arquivo `dlq_errors.txt` na pasta de saída, com prefixo auditável:
+### 4. Dead Letter Queue (DLQ) — Auditoria e Compliance LGPD
+Linhas rejeitadas (JSON malformado, tipo inesperado) **não são mais descartadas silenciosamente**. Elas são gravadas no arquivo `dlq_errors.txt` na pasta de saída, com prefixo auditável. 
+Para garantir conformidade com a **LGPD (Data Masking)**, expressões regulares ofuscam ativamente PIIs (como Emails e CPFs) antes da escrita em disco, substituindo-os por `[EMAIL_OCULTO]` e `[CPF_OCULTO]`.
+Exemplo de auditoria:
 ```
 [LINHA:4][JSON_MALFORMADO] isto nao e json
 [LINHA:7][TIPO_INVALIDO:list] ["lista em vez de dict"]
 ```
-Isso permite que a equipe de Data Quality inspecione, quantifique e reprocesse os dados corrompidos.
+Isso permite que a equipe de Data Quality inspecione os dados sem violar a privacidade.
 
-### 5. Escritas Atômicas (Idempotência)
-Em sistemas distribuídos, falhas no meio do pipeline não podem deixar os arquivos de destino corrompidos pela metade. Para atingir **Idempotência**, o processador grava todos os resultados em arquivos temporários (`.tmp`). Somente se todo o pipeline finalizar com sucesso, uma syscall `os.replace` (operação atômica em POSIX/NTFS) renomeia instantaneamente os arquivos para `.csv`. Em caso de erro fatal abortivo (ex: container morrendo por disco cheio), o `finally` varre os buffers residuais temporários, mantendo a base final limpa para re-execuções.
+### 5. Escritas Atômicas (Atomic Directory Promotion) & Bootstrap Sanitization
+Em sistemas distribuídos, falhas no meio do pipeline não podem deixar os arquivos de destino corrompidos. Para atingir **Idempotência absoluta**, implementamos o conceito de **Transação Atômica Multi-Arquivo**:
+- **Bootstrap Sanitization**: Antes do processamento iniciar, resíduos de execuções abortadas no passado (OOMKilled) são varridos (pastas `.tmp_run_*`).
+- O processador cria um subdiretório temporário com UUID exclusivo e todos os outputs (`clubs.csv`, `players.csv`, `dlq_errors.txt`) são direcionados para lá.
+- Somente se o pipeline finalizar com sucesso, uma syscall `os.replace` consolida cada arquivo na pasta de destino de forma atômica. Se um erro abortivo ocorrer, o `finally` detona todo o subdiretório temporário, mantendo o workspace imaculado.
 
 > A documentação aprofundada de requisitos, logs da Inteligência Artificial par (Auditoria) e o diário de ADRs (Architecture Decision Records) residem fora do repositório de código, na pasta `/spec`.

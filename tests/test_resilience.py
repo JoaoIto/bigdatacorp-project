@@ -10,7 +10,7 @@ def chaos_jsonl(tmp_path):
         '{"championship": "SERIE A", "name": "Valido 1"}',
         '',
         '{"championship": "SERIE B", "name": "Valido 2", "players": [{"name": "P1"}]}',
-        'isto nao e json',
+        'isto nao e json com teste@empresa.com e 123.456.789-00',
         '{"championship": "SERIE A", "colors": "nao sou lista"}',
         '{"championship": "SERIE B", "players": "nao sou lista"}',
         '["lista em vez de dict"]',
@@ -38,7 +38,7 @@ class TestResilience:
         # Total lidas deve ser 8
         assert stats["linhas_lidas"] == 8
         assert stats["linhas_vazias"] == 1
-        assert stats["linhas_json_invalido"] == 3 # 'isto nao...', lista raiz, numero raiz
+        assert stats["linhas_json_invalido"] == 3
         assert stats["linhas_dlq"] == 3
         
         # Arquivos criados com sucesso
@@ -48,10 +48,17 @@ class TestResilience:
         assert clubs_path.exists()
         assert dlq_path.exists()
         
-        # Valida conteúdo da DLQ
+        # Valida conteúdo da DLQ e o Data Masking LGPD
         with open(dlq_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
             assert len(lines) == 3
             assert "[LINHA:4][JSON_MALFORMADO]" in lines[0]
+            
+            # Valida ofuscação (LGPD) no erro malformado
+            assert "[EMAIL_OCULTO]" in lines[0]
+            assert "[CPF_OCULTO]" in lines[0]
+            assert "teste@empresa.com" not in lines[0]
+            assert "123.456.789-00" not in lines[0]
+            
             assert "[LINHA:7][TIPO_INVALIDO:list]" in lines[1]
             assert "[LINHA:8][TIPO_INVALIDO:int]" in lines[2]

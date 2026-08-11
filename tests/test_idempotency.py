@@ -35,11 +35,13 @@ class TestIdempotency:
         with pytest.raises(KeyboardInterrupt, match="Simulate fatal failure mid-process!"):
             process(str(partial_jsonl), str(output_dir))
             
-        # Verifica que o diretório não contém nenhum arquivo temporário
+        # Verifica que o diretório não contém nenhuma pasta temporária nem os csv parciais
         files = os.listdir(output_dir)
         
-        # Não deve haver lixo .tmp ou arquivos csv pela metade
-        assert "clubs.csv.tmp" not in files
-        assert "players.csv.tmp" not in files
+        # Não deve haver diretório .tmp_run_ ou arquivos csv consolidados
+        for f in files:
+            assert not f.startswith(".tmp_run_")
+            assert not f.endswith(".tmp")
+            
         assert "clubs.csv" not in files
         assert "players.csv" not in files

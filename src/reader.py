@@ -13,9 +13,14 @@ Decisão arquitetural: spec/decisions.md ADR-009 (Dead Letter Queue)
 
 import json
 import logging
+import re
 from typing import Any, Dict, Generator, IO, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ── Compilação Estática de Regex para Data Masking (LGPD) ──
+RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+RE_CPF = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b")
 
 # Buffer de 256 KB para reduzir syscalls de I/O (ADR-008)
 IO_BUFFER_SIZE: int = 262144
@@ -147,8 +152,13 @@ def _write_dlq(
     """
     if dlq_writer is None:
         return
+        
+    # Data Masking (Compliance LGPD)
+    masked_line = RE_EMAIL.sub("[EMAIL_OCULTO]", raw_line)
+    masked_line = RE_CPF.sub("[CPF_OCULTO]", masked_line)
+    
     try:
-        dlq_writer.write(f"[LINHA:{line_number}][{reason}] {raw_line}\n")
+        dlq_writer.write(f"[LINHA:{line_number}][{reason}] {masked_line}\n")
         stats['linhas_dlq'] += 1
     except OSError:
         # Falha na escrita da DLQ não deve abortar o pipeline principal
