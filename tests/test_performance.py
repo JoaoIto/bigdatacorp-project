@@ -25,11 +25,11 @@ class TestPerformance:
         
         # Simular a passagem de 250.000 linhas pelo orquestrador sem I/O real
         # read_jsonl é um generator, então precisamos criar um gerador mockado.
-        def fake_generator(input_path, stats, dlq_fh):
+        def fake_generator(input_path, stats, dlq_callback, start_offset):
             # Simulamos 250.000 registros, incrementando a estatística
             for i in range(1, 250001):
                 stats["linhas_lidas"] += 1
-                yield i, {"championship": "SERIE A", "name": f"Mock {i}"}
+                yield i, {"championship": "SERIE A", "name": f"Mock {i}"}, i * 100
                 
         mock_read_jsonl.side_effect = fake_generator
         

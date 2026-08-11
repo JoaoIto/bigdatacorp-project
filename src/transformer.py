@@ -33,100 +33,48 @@ VALID_CHAMPIONSHIPS = {"SERIE A", "SERIE B"}
 # Formatos de data aceitos no parse (tentados em ordem)
 DATE_FORMATS = ["%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"]
 
-# Cabeçalhos dos CSVs — nomes em português, na ordem exata exigida
-# pelo enunciado (incluindo acentos, espaços e caixa).
-
-CLUBS_HEADER = [
-    "Id do Clube",
-    "Nome",
-    "Campeonato",
-    "Data de Fundação",
-    "Cidade",
-    "Estado",
-    "País",
-    "Estádio",
-    "Presidente",
-    "Apelido",
-    "Cores",
-]
-
-PLAYERS_HEADER = [
-    "Id do Clube",
-    "Id do Jogador",
-    "Nome",
-    "Idade",
-    "Gols",
-    "Data de Estreia",
-    "Posição",
-    "Número da Camisa",
-]
+# Cabeçalhos estão agora em schema.py
 
 
 # ──────────────────────────────────────────────────────────────
 # Funções auxiliares de validação e formatação
 # ──────────────────────────────────────────────────────────────
 
-def is_valid_championship(record: Dict[str, Any]) -> bool:
-    """Verifica se o clube pertence à Série A ou Série B (RN01).
+# ──────────────────────────────────────────────────────────────
+# Padrão: Chain of Responsibility para Validações Modulares
+# ──────────────────────────────────────────────────────────────
 
-    A comparação é case-insensitive e tolerante a espaços extras.
-    Aceita variações como "SERIE A", "Serie A", " serie b ",
-    "Série A", "SÉRIE B" (com ou sem acento).
+class Validator:
+    """Base protocol para validação na cadeia."""
+    def validate(self, record: Dict[str, Any]) -> Tuple[bool, str]:
+        """Retorna (is_valid, error_reason_if_any)."""
+        raise NotImplementedError
 
-    Args:
-        record (dict): O dict do clube parseado do JSONL.
-
-    Returns:
-        bool: True se o campeonato for Série A ou B, False caso contrário.
-
-    Examples:
-        >>> is_valid_championship({"championship": "SERIE A"})
-        True
-        >>> is_valid_championship({"championship": "SEM CAMPEONATO"})
-        False
-        >>> is_valid_championship({"championship": None})
-        False
-        >>> is_valid_championship({})
-        False
-    """
-    championship = record.get("championship")
-
-    if not championship or not isinstance(championship, str):
-        return False
-
-    # Normaliza: strip + uppercase + remove acento do É
-    normalized = championship.strip().upper().replace("É", "E")
-
-    return normalized in VALID_CHAMPIONSHIPS
+class ChampionshipFilter(Validator):
+    """Verifica se o clube pertence à Série A ou Série B (RN01)."""
+    def validate(self, record: Dict[str, Any]) -> Tuple[bool, str]:
+        championship = record.get("championship")
+        if not championship or not isinstance(championship, str):
+            return False, "CHAMPIONSHIP_INVALID"
+            
+        normalized = championship.strip().upper().replace("É", "E")
+        if normalized in VALID_CHAMPIONSHIPS:
+            return True, ""
+        return False, "CHAMPIONSHIP_OUT_OF_SCOPE"
 
 
-def safe_str(record: Dict[str, Any], key: str) -> str:
-    """Extrai um campo do dict com fallback seguro para string vazia (RN05).
+# Instanciação da cadeia de validação
+VALIDATION_CHAIN: List[Validator] = [
+    ChampionshipFilter(),
+]
 
-    Se a chave estiver ausente ou o valor for None, retorna "".
-    Valores numéricos (int, float) são convertidos para string.
-
-    Args:
-        record (dict): O dicionário fonte.
-        key (str): A chave a buscar.
-
-    Returns:
-        str: O valor como string, ou "" se ausente/None.
-
-    Examples:
-        >>> safe_str({"name": "Corinthians"}, "name")
-        'Corinthians'
-        >>> safe_str({"age": 26}, "age")
-        '26'
-        >>> safe_str({"nickname": None}, "nickname")
-        ''
-        >>> safe_str({}, "missing_key")
-        ''
-    """
-    value = record.get(key)
-    if value is None:
-        return ""
-    return str(value)
+def run_validations(record: Dict[str, Any]) -> Tuple[bool, str]:
+    """Passa o registro pela esteira de validadores (Chain of Responsibility)."""
+    for validator in VALIDATION_CHAIN:
+        is_valid, reason = validator.validate(record)
+        if not is_valid:
+            return False, reason
+    return True, ""
 
 
 def format_date(value: Any) -> str:
@@ -225,56 +173,27 @@ def format_colors(colors: Any) -> str:
 # Funções de transformação (mapeamento JSON → CSV row)
 # ──────────────────────────────────────────────────────────────
 
-def transform_club(record: Dict[str, Any]) -> List[str]:
-    """Transforma um dict de clube em uma row para clubs.csv.
-
-    Aplica todas as regras de formatação (datas, cores, campos nulos)
-    e retorna os 11 campos na ordem exata exigida pelo enunciado.
-
-    Campos descartados do JSON (não mapeados): titles, players.
-
+def transform_by_schema(record: Dict[str, Any], schema: List[Tuple[str, str, Any]]) -> List[str]:
+    """Aplica uma transformação dinâmica baseada no schema declarativo.
+    
     Args:
-        record (dict): O dict do clube parseado do JSONL.
-
+        record: O dict parseado do JSON.
+        schema: A lista de tuplas (Coluna, ChaveJSON, FunçãoTransformação).
+        
     Returns:
-        list[str]: Lista de 11 strings na ordem do cabeçalho CLUBS_HEADER.
+        list[str]: Lista de strings prontas para o CSV.
     """
-    return [
-        safe_str(record, "club_id"),        # Id do Clube
-        safe_str(record, "name"),            # Nome
-        safe_str(record, "championship"),    # Campeonato
-        format_date(record.get("founding_date")),  # Data de Fundação
-        safe_str(record, "city"),            # Cidade
-        safe_str(record, "state"),           # Estado
-        safe_str(record, "country"),         # País
-        safe_str(record, "stadium"),         # Estádio
-        safe_str(record, "president"),       # Presidente
-        safe_str(record, "nickname"),        # Apelido
-        format_colors(record.get("colors")), # Cores
-    ]
+    return [transform_fn(record.get(json_key)) for _, json_key, transform_fn in schema]
 
+def transform_club(record: Dict[str, Any]) -> List[str]:
+    """Aplica as transformações e retorna uma linha pronta para o CSV."""
+    from schema import CLUBS_SCHEMA
+    return transform_by_schema(record, CLUBS_SCHEMA)
 
 def transform_player(club_id: str, player: Dict[str, Any]) -> List[str]:
-    """Transforma um dict de jogador em uma row para players.csv.
-
-    O club_id é recebido do clube pai para estabelecer a relação 1:N.
-
-    Campos descartados do JSON (não mapeados): nationality, market_value.
-
-    Args:
-        club_id (str): O club_id do clube ao qual o jogador pertence.
-        player (dict): O dict de um jogador do array 'players'.
-
-    Returns:
-        list[str]: Lista de 8 strings na ordem do cabeçalho PLAYERS_HEADER.
-    """
-    return [
-        club_id,                                    # Id do Clube
-        safe_str(player, "player_id"),              # Id do Jogador
-        safe_str(player, "name"),                   # Nome
-        safe_str(player, "age"),                    # Idade
-        safe_str(player, "goals"),                  # Gols
-        format_date(player.get("debut_date")),      # Data de Estreia
-        safe_str(player, "position"),               # Posição
-        safe_str(player, "shirt_number"),           # Número da Camisa
-    ]
+    """Associa um jogador ao ID do clube e aplica as transformações (RN02)."""
+    # Injeta a referência (RN02)
+    from schema import PLAYERS_SCHEMA
+    player_copy = dict(player)
+    player_copy["club_id"] = club_id
+    return transform_by_schema(player_copy, PLAYERS_SCHEMA)

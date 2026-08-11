@@ -1,38 +1,37 @@
 import pytest
 from src.transformer import (
-    is_valid_championship,
-    safe_str,
+    run_validations,
     format_date,
     format_colors,
     _format_colors_cached,
 )
+from src.schema import safe_value
 
 class TestTransformer:
-    def test_is_valid_championship(self):
+    def test_run_validations(self):
         # Casos válidos
-        assert is_valid_championship({"championship": "SERIE A"}) is True
-        assert is_valid_championship({"championship": "Série B"}) is True
-        assert is_valid_championship({"championship": " serie a "}) is True
-        assert is_valid_championship({"championship": "série a"}) is True
-        assert is_valid_championship({"championship": "SÉRIE B"}) is True
+        assert run_validations({"championship": "SERIE A"}) == (True, "")
+        assert run_validations({"championship": "Série B"}) == (True, "")
+        assert run_validations({"championship": " serie a "}) == (True, "")
+        assert run_validations({"championship": "série a"}) == (True, "")
+        assert run_validations({"championship": "SÉRIE B"}) == (True, "")
         
         # Casos inválidos
-        assert is_valid_championship({"championship": "SERIE C"}) is False
-        assert is_valid_championship({"championship": "SEM CAMPEONATO"}) is False
-        assert is_valid_championship({"championship": ""}) is False
-        assert is_valid_championship({"championship": None}) is False
-        assert is_valid_championship({}) is False
-        assert is_valid_championship({"championship": 123}) is False
+        assert run_validations({"championship": "SERIE C"}) == (False, "CHAMPIONSHIP_OUT_OF_SCOPE")
+        assert run_validations({"championship": "SEM CAMPEONATO"}) == (False, "CHAMPIONSHIP_OUT_OF_SCOPE")
+        assert run_validations({"championship": ""}) == (False, "CHAMPIONSHIP_INVALID")
+        assert run_validations({"championship": None}) == (False, "CHAMPIONSHIP_INVALID")
+        assert run_validations({}) == (False, "CHAMPIONSHIP_INVALID")
+        assert run_validations({"championship": 123}) == (False, "CHAMPIONSHIP_INVALID")
 
-    def test_safe_str(self):
+    def test_safe_value(self):
         # Casos comuns
-        assert safe_str({"name": "Clube"}, "name") == "Clube"
-        assert safe_str({"age": 26}, "age") == "26"
-        assert safe_str({"age": 0}, "age") == "0"
+        assert safe_value("Clube") == "Clube"
+        assert safe_value(26) == "26"
+        assert safe_value(0) == "0"
         
         # Fallbacks seguros (RN05)
-        assert safe_str({"nickname": None}, "nickname") == ""
-        assert safe_str({}, "missing") == ""
+        assert safe_value(None) == ""
 
     def test_format_date(self):
         # Casos válidos

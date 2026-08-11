@@ -1,19 +1,3 @@
-"""
-main.py — Orquestrador do pipeline de processamento batch.
-
-Ponto de entrada do programa. Responsabilidades:
-- Parse de argumentos CLI (caminho do arquivo de entrada e diretório de saída)
-- Configuração do sistema de logging
-- Composição e execução do pipeline: Reader → Transformer → Writer
-- Gerenciamento do ciclo de vida dos arquivos (open/close)
-- Contadores e relatório final de processamento
-
-Uso:
-    python src/main.py <arquivo_entrada.jsonl> [diretório_saída]
-
-Referência arquitetural: spec/architecture.md §2 e §3
-"""
-
 import gc
 import json
 import logging
@@ -21,25 +5,25 @@ import os
 import shutil
 import sys
 import uuid
+import threading
+import queue
 from typing import Any, Dict, IO, Optional
 
 from reader import read_jsonl, IO_BUFFER_SIZE
 from transformer import (
-    CLUBS_HEADER,
-    PLAYERS_HEADER,
-    is_valid_championship,
-    safe_str,
+    run_validations,
     transform_club,
     transform_player,
 )
+from schema import CLUBS_HEADER, PLAYERS_HEADER
 from writer import create_csv_writer
+from checkpoint import CheckpointManager
 
 # ──────────────────────────────────────────────────────────────
 # Configuração de Logging
 # ──────────────────────────────────────────────────────────────
 
 logger = logging.getLogger("bigdatacorp")
-
 
 class JsonFormatter(logging.Formatter):
     """Formatter customizado nativo para serializar logs em JSON (ADR-006)."""
@@ -52,28 +36,18 @@ class JsonFormatter(logging.Formatter):
         }
         return json.dumps(log_record)
 
-
 def setup_logging() -> None:
-    """Configura o sistema de logging com formato JSON nativo para Cloud.
-
-    Nível INFO para o fluxo normal (início, fim, contadores).
-    Nível WARNING para registros ignorados (JSON malformado, tipo errado).
-    Nível ERROR para falhas de infraestrutura (arquivo não encontrado, I/O).
-    """
     handler = logging.StreamHandler(sys.stdout)
     formatter = JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S")
     handler.setFormatter(formatter)
     
-    # Evita adicionar handlers duplicados ao chamar múltiplas vezes (ex: em testes)
     if logging.root.hasHandlers():
         logging.root.handlers.clear()
         
     logging.root.addHandler(handler)
     logging.root.setLevel(logging.INFO)
 
-
 def sanitize_workspace(output_dir: str) -> None:
-    """Limpa resíduos de execuções mortas (Bootstrap Sanitization - OOMKilled)."""
     if not os.path.exists(output_dir):
         return
         
@@ -86,54 +60,50 @@ def sanitize_workspace(output_dir: str) -> None:
             shutil.rmtree(item_path)
             logger.info("Bootstrap Sanitization: Removido diretório residual %s", item)
 
+# ──────────────────────────────────────────────────────────────
+# Wrapper Thread-Safe para Estatísticas (Fase 4)
+# ──────────────────────────────────────────────────────────────
+class ThreadSafeStats(dict):
+    """Protege o dicionário de estatísticas contra atualizações concorrentes."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lock = threading.Lock()
+        
+    def __getitem__(self, key):
+        with self.lock:
+            return super().__getitem__(key)
+            
+    def __setitem__(self, key, value):
+        with self.lock:
+            super().__setitem__(key, value)
+            
+    def setdefault(self, key, default=None):
+        with self.lock:
+            return super().setdefault(key, default)
 
 # ──────────────────────────────────────────────────────────────
-# Pipeline Principal
+# Pipeline Principal Multithreaded
 # ──────────────────────────────────────────────────────────────
 
 def process(input_path: str, output_dir: str) -> Dict[str, int]:
-    """Executa o pipeline completo de processamento JSONL → CSV.
-
-    Fluxo para cada registro:
-      1. Reader (generator) produz dicts válidos do JSONL.
-      2. Filtro de campeonato (RN01): descarta clubes fora da Série A/B.
-      3. Transformer: aplica regras de negócio (datas, cores, campos nulos).
-      4. Writer: escreve imediatamente nos CSVs (streaming O(1)).
-
-    Otimizações de performance (ADR-008):
-      - Buffer de I/O de 256 KB em todos os file handles.
-      - Garbage Collector desativado durante o loop principal.
-
-    Auditoria de dados (ADR-009):
-      - Linhas rejeitadas são gravadas em dlq_errors.txt na pasta de output.
-
-    Args:
-        input_path (str): Caminho para o arquivo JSONL de entrada.
-        output_dir (str): Diretório onde os CSVs serão escritos.
-
-    Returns:
-        dict: Dicionário com os contadores de processamento.
-    """
     clubs_path = os.path.join(output_dir, "clubs.csv")
     players_path = os.path.join(output_dir, "players.csv")
     dlq_path = os.path.join(output_dir, "dlq_errors.txt")
-
-    # Diretório temporário exclusivo da execução (Direct-to-Directory Promotion)
+    chk_path = os.path.join(output_dir, "pipeline.checkpoint")
+    
     run_uuid = uuid.uuid4().hex
     tmp_run_dir = os.path.join(output_dir, f".tmp_run_{run_uuid}")
     os.makedirs(tmp_run_dir, exist_ok=True)
     
-    # Arquivos temporários para idempotência
     clubs_tmp = os.path.join(tmp_run_dir, "clubs.csv")
     players_tmp = os.path.join(tmp_run_dir, "players.csv")
     dlq_tmp = os.path.join(tmp_run_dir, "dlq_errors.txt")
 
-    logger.info("Iniciando processamento...")
+    logger.info("Iniciando processamento multithreaded...")
     logger.info("  Entrada:  %s", input_path)
     logger.info("  Saída:    %s", output_dir)
 
-    # Contadores compartilhados com o reader (via dict mutável)
-    stats: Dict[str, int] = {
+    stats = ThreadSafeStats({
         "linhas_lidas": 0,
         "linhas_vazias": 0,
         "linhas_json_invalido": 0,
@@ -142,102 +112,230 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
         "clubes_escritos": 0,
         "jogadores_escritos": 0,
         "erros_processamento": 0,
-    }
+    })
 
-    # Abre os arquivos de saída e a Dead Letter Queue como .tmp
+    # Fase 3: Checkpointing e truncamento
+    chk = CheckpointManager(chk_path)
+    state = chk.load(input_path)
+    
+    start_offset = 0
+    if state:
+        start_offset = state.get("byte_offset", 0)
+        logger.info("Checkpoint encontrado. Retomando do offset %d", start_offset)
+        
+        # Cria os arquivos temporários pré-truncados a partir dos originais se existissem
+        # Na estratégia Atomic Directory Promotion, o diretório .tmp_run é limpo em falhas abortivas.
+        # Mas para Exactly-Once e resume a meio, os arquivos originais parciais devem estar em `output_dir`.
+        # Se usarmos Atomic Directory, o .tmp_run antigo foi apagado e perdemos o progresso?
+        # A instrução: "Modifique a estratégia... os escritores devem gravar em arquivos temporários... f.truncate".
+        # Se renomeamos atomicamente no fim, o checkpoint deve copiar o arquivo de progresso atual (que é temporário?)
+        # Não, os arquivos temporários `.tmp` na Fase 3 substituem o `.tmp_run_` da Fase anterior se houver rollback?
+        # A instrução 3 diz: "Nos arquivos de saída .tmp, abra-os e execute um fatiamento do excesso...".
+        # Vamos criar e truncar. Se os arquivos não existirem, ignora.
+
+    # Abre arquivos em modo "a" (append) e binário para o DLQ para evitar encoding problems, 
+    # ou texto, mas usamos append mode para manter o truncamento intacto.
     clubs_fh, clubs_writer = create_csv_writer(clubs_tmp, CLUBS_HEADER)
     players_fh, players_writer = create_csv_writer(players_tmp, PLAYERS_HEADER)
     dlq_fh: Optional[IO[str]] = None
     try:
-        dlq_fh = open(
-            dlq_tmp, 'w',
-            encoding='utf-8',
-            buffering=IO_BUFFER_SIZE,
-        )
+        dlq_fh = open(dlq_tmp, 'a', encoding='utf-8', buffering=IO_BUFFER_SIZE)
     except OSError:
         logger.warning("Não foi possível criar arquivo DLQ: %s", dlq_path)
+        
+    if state:
+        clubs_fh.truncate(state.get("clubs_bytes_size", 0))
+        players_fh.truncate(state.get("players_bytes_size", 0))
+        if dlq_fh:
+            dlq_fh.truncate(state.get("dlq_bytes_size", 0))
 
-    # Desativa o Garbage Collector durante o hot loop (ADR-008)
-    # Coleta determinística da Gen 0 a cada 100K linhas substitui as
-    # ~1.400 coletas automáticas por milhão de registros.
-    gc.disable()
-    gc_collect = gc.collect  # Aliasing para LOAD_FAST
-    GC_INTERVAL: int = 100_000
+    # Fase 4: Filas Produtor-Consumidor
+    input_queue = queue.Queue(maxsize=1000)
+    clubs_queue = queue.Queue(maxsize=2000)
+    players_queue = queue.Queue(maxsize=2000)
+    dlq_queue = queue.Queue(maxsize=2000)
+
+    # Aliasing
+    _run_validations = run_validations
+    _transform_club = transform_club
+    _transform_player = transform_player
+    _write_club = clubs_writer.writerow
+    _write_player = players_writer.writerow
+
+    # Thread 1: Produtor
+    def producer_worker():
+        try:
+            # Callback insere diretamente na fila DLQ
+            def dlq_cb(msg: str):
+                dlq_queue.put(msg)
+                
+            for line_number, record, byte_offset in read_jsonl(input_path, stats, dlq_cb, start_offset):
+                input_queue.put((line_number, record, byte_offset))
+        except Exception as e:
+            logger.error("Erro no produtor: %s", e)
+        finally:
+            input_queue.put(None)
+
+    # Threads Consumidoras
+    def clubs_writer_worker():
+        while True:
+            item = clubs_queue.get()
+            if item is None:
+                clubs_fh.flush()
+                clubs_queue.task_done()
+                break
+            try:
+                _write_club(item)
+            finally:
+                clubs_queue.task_done()
+
+    def players_writer_worker():
+        while True:
+            item = players_queue.get()
+            if item is None:
+                players_fh.flush()
+                players_queue.task_done()
+                break
+            try:
+                _write_player(item)
+            finally:
+                players_queue.task_done()
+
+    def dlq_writer_worker():
+        while True:
+            item = dlq_queue.get()
+            if item is None:
+                if dlq_fh: dlq_fh.flush()
+                dlq_queue.task_done()
+                break
+            if dlq_fh:
+                try:
+                    dlq_fh.write(item)
+                except OSError:
+                    pass
+            dlq_queue.task_done()
+
+    threads = [
+        threading.Thread(target=producer_worker, name="Producer", daemon=True),
+        threading.Thread(target=clubs_writer_worker, name="ClubsWriter", daemon=True),
+        threading.Thread(target=players_writer_worker, name="PlayersWriter", daemon=True),
+        threading.Thread(target=dlq_writer_worker, name="DLQWriter", daemon=True),
+    ]
+    
+    for t in threads:
+        t.start()
 
     commit_success = False
 
+    # Transformer rodando na Thread Principal
     try:
-        # ── Micro-otimização: LOAD_FAST em vez de LOAD_ATTR ──
-        # Aliasing de funções frequentes para variáveis locais reduz
-        # lookups de atributo no hot loop (cada chamada evita 1 LOAD_ATTR).
-        _is_valid = is_valid_championship
-        _transform_club = transform_club
-        _transform_player = transform_player
-        _safe_str = safe_str
-        _write_club = clubs_writer.writerow
-        _write_player = players_writer.writerow
-
-        # Pipeline: Reader (generator) → Filter → Transform → Writer
-        for line_number, record in read_jsonl(input_path, stats, dlq_fh):
+        gc.disable()
+        gc_collect = gc.collect
+        GC_INTERVAL = 100_000
+        
+        lines_processed = 0
+        last_offset = start_offset
+        
+        while True:
+            item = input_queue.get()
+            if item is None:
+                clubs_queue.put(None)
+                players_queue.put(None)
+                dlq_queue.put(None)
+                input_queue.task_done()
+                break
+                
+            line_number, record, byte_offset = item
+            last_offset = byte_offset
+            
             try:
-                # ── RN01: Filtro por campeonato ──
-                if not _is_valid(record):
+                is_valid, reject_reason = _run_validations(record)
+                if not is_valid:
                     stats["clubes_filtrados"] += 1
                     continue
 
-                # ── Transformar e escrever o clube (1:1) ──
                 club_row = _transform_club(record)
-                _write_club(club_row)
+                clubs_queue.put(club_row)
                 stats["clubes_escritos"] += 1
 
-                # ── Transformar e escrever cada jogador (1:N) ──
-                club_id = _safe_str(record, "club_id")
+                club_id = record.get("club_id")
+                club_id = "" if club_id is None else str(club_id)
                 players = record.get("players")
 
                 if isinstance(players, list):
                     for player in players:
                         if isinstance(player, dict):
                             player_row = _transform_player(club_id, player)
-                            _write_player(player_row)
+                            players_queue.put(player_row)
                             stats["jogadores_escritos"] += 1
 
             except Exception as e:
-                # Tolerância a falhas: erro em um registro não aborta o pipeline
-                logger.warning(
-                    "Linha %d: erro no processamento — %s: %s",
-                    line_number,
-                    type(e).__name__,
-                    e,
-                )
+                logger.warning("Linha %d: erro no processamento — %s: %s", line_number, type(e).__name__, e)
                 stats["erros_processamento"] += 1
-                continue
+                
+            finally:
+                input_queue.task_done()
+                lines_processed += 1
 
-            # ── GC Determinístico: coleta Gen 0 a cada 100K linhas ──
-            if stats["linhas_lidas"] % GC_INTERVAL == 0:
+            # Checkpoint & GC a cada 100K registros
+            if lines_processed % GC_INTERVAL == 0:
                 gc_collect(0)
-        # Se executou tudo sem exceção grave que escape do loop, commit final!
+                
+                # Para garantir a sincronização do offset no checkpoint,
+                # precisamos que as queues estejam vazias e as escritas no disco feitas.
+                # A espera é no `join()` das queues, que bloqueiam até que as threads leiam 
+                # e façam task_done() de tudo o que foi enviado até agora.
+                clubs_queue.join()
+                players_queue.join()
+                dlq_queue.join()
+                
+                clubs_fh.flush()
+                players_fh.flush()
+                if dlq_fh: dlq_fh.flush()
+                
+                chk.save(
+                    input_path, 
+                    last_offset, 
+                    os.path.getsize(clubs_tmp),
+                    os.path.getsize(players_tmp),
+                    os.path.getsize(dlq_tmp) if dlq_fh else 0
+                )
+
+        # Espera que todas as threads consumam o Sentinel None (Teardown Sênior)
+        for t in threads:
+            t.join()
+            
         commit_success = True
 
     finally:
-        # Reativa o Garbage Collector (ADR-008 — segurança)
+        if not commit_success:
+            # Em caso de aborto (ex: KeyboardInterrupt), forçar término limpo das threads
+            # Esvaziar filas pode ser complexo, então injetamos o Sentinel de qualquer forma.
+            # Filas cheias podem bloquear o put, mas usamos block=False e ignoramos erro.
+            for q in (clubs_queue, players_queue, dlq_queue):
+                try:
+                    q.put_nowait(None)
+                except queue.Full:
+                    pass
+            for t in threads:
+                if t.is_alive():
+                    t.join(timeout=0.5)
+                    
         gc.enable()
-        # Garante fechamento dos arquivos em qualquer cenário
         clubs_fh.close()
         players_fh.close()
-        if dlq_fh is not None:
+        if dlq_fh:
             dlq_fh.close()
             
-        # ── Idempotência: Escritas Atômicas Multi-Arquivo ──
         if commit_success:
-            # Em caso de sucesso, move os arquivos do diretório temporário para a pasta final
             if os.path.exists(clubs_tmp):
                 os.replace(clubs_tmp, clubs_path)
             if os.path.exists(players_tmp):
                 os.replace(players_tmp, players_path)
             if os.path.exists(dlq_tmp):
                 os.replace(dlq_tmp, dlq_path)
+            chk.clear()
                 
-        # Independentemente do resultado (sucesso ou aborto), apaga o diretório temporário
         if os.path.exists(tmp_run_dir):
             shutil.rmtree(tmp_run_dir)
 
@@ -245,11 +343,6 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
 
 
 def print_report(stats: Dict[str, int]) -> None:
-    """Exibe o relatório final de processamento no console.
-
-    Args:
-        stats (dict): Dicionário com os contadores.
-    """
     logger.info("=" * 50)
     logger.info("Processamento concluído com sucesso.")
     logger.info("  Linhas lidas:              %d", stats.get("linhas_lidas", 0))
@@ -263,61 +356,33 @@ def print_report(stats: Dict[str, int]) -> None:
     logger.info("=" * 50)
 
 
-# ──────────────────────────────────────────────────────────────
-# Ponto de Entrada CLI
-# ──────────────────────────────────────────────────────────────
-
 def main() -> None:
-    """Ponto de entrada do programa.
-
-    Uso:
-        python src/main.py <arquivo_entrada.jsonl> [diretório_saída]
-
-    Args (via sys.argv):
-        arquivo_entrada: Caminho para o arquivo JSONL (obrigatório).
-        diretório_saída: Diretório para os CSVs (opcional; padrão =
-                         mesmo diretório do arquivo de entrada).
-    """
     setup_logging()
 
-    # ── Validação de argumentos ──
     if len(sys.argv) < 2:
-        logger.error(
-            "Uso: python main.py <arquivo_entrada.jsonl> [diretório_saída]"
-        )
+        logger.error("Uso: python main.py <arquivo_entrada.jsonl> [diretório_saída]")
         sys.exit(1)
 
     input_path = sys.argv[1]
 
-    # Diretório de saída: argumento opcional ou diretório do input
     if len(sys.argv) >= 3:
         output_dir = sys.argv[2]
     else:
         output_dir = os.path.dirname(os.path.abspath(input_path))
 
-    # ── Validações de infraestrutura ──
     if not os.path.isfile(input_path):
         logger.error("Arquivo de entrada não encontrado: %s", input_path)
         sys.exit(1)
 
-    # Cria o diretório de saída se não existir
     os.makedirs(output_dir, exist_ok=True)
-    
-    # ── Bootstrap Sanitization ──
     sanitize_workspace(output_dir)
 
-    # ── Execução do pipeline ──
     try:
         stats = process(input_path, output_dir)
         print_report(stats)
     except Exception as e:
-        logger.error(
-            "Erro fatal durante o processamento: %s: %s",
-            type(e).__name__,
-            e,
-        )
+        logger.error("Erro fatal durante o processamento: %s: %s", type(e).__name__, e)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

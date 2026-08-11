@@ -18,8 +18,8 @@ def partial_jsonl(tmp_path):
     return file_path
 
 class TestIdempotency:
-    @patch('src.main.is_valid_championship')
-    def test_idempotency_atomic_writes(self, mock_is_valid, tmp_path, partial_jsonl):
+    @patch('src.main.run_validations')
+    def test_idempotency_atomic_writes(self, mock_run_validations, tmp_path, partial_jsonl):
         """
         O Teste do Cisne Negro: Garante que se uma exceção não-tratada (abortiva)
         acontecer a meio do processamento, os ficheiros .tmp são apagados no finally
@@ -30,7 +30,7 @@ class TestIdempotency:
         
         # O mock vai funcionar na primeira linha e explodir na segunda com KeyboardInterrupt
         # (Usamos KeyboardInterrupt porque ele herda de BaseException e fura o `except Exception:` do pipeline)
-        mock_is_valid.side_effect = [True, KeyboardInterrupt("Simulate fatal failure mid-process!"), True]
+        mock_run_validations.side_effect = [(True, ""), KeyboardInterrupt("Simulate fatal failure mid-process!"), (True, "")]
         
         with pytest.raises(KeyboardInterrupt, match="Simulate fatal failure mid-process!"):
             process(str(partial_jsonl), str(output_dir))
