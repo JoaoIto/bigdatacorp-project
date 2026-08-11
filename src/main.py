@@ -63,21 +63,21 @@ def sanitize_workspace(output_dir: str) -> None:
 # ──────────────────────────────────────────────────────────────
 # Wrapper Thread-Safe para Estatísticas (Fase 4)
 # ──────────────────────────────────────────────────────────────
-class ThreadSafeStats(dict):
+class ThreadSafeStats(Dict[str, int]):
     """Protege o dicionário de estatísticas contra atualizações concorrentes."""
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.lock = threading.Lock()
         
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> int:
         with self.lock:
             return super().__getitem__(key)
             
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: int) -> None:
         with self.lock:
             super().__setitem__(key, value)
             
-    def setdefault(self, key, default=None):
+    def setdefault(self, key: str, default: Optional[int] = None) -> int:
         with self.lock:
             return super().setdefault(key, default)
 
@@ -150,10 +150,10 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
             dlq_fh.truncate(state.get("dlq_bytes_size", 0))
 
     # Fase 4: Filas Produtor-Consumidor
-    input_queue = queue.Queue(maxsize=1000)
-    clubs_queue = queue.Queue(maxsize=2000)
-    players_queue = queue.Queue(maxsize=2000)
-    dlq_queue = queue.Queue(maxsize=2000)
+    input_queue: queue.Queue[Any] = queue.Queue(maxsize=1000)
+    clubs_queue: queue.Queue[Any] = queue.Queue(maxsize=2000)
+    players_queue: queue.Queue[Any] = queue.Queue(maxsize=2000)
+    dlq_queue: queue.Queue[Any] = queue.Queue(maxsize=2000)
 
     # Aliasing
     _run_validations = run_validations
@@ -163,10 +163,10 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
     _write_player = players_writer.writerow
 
     # Thread 1: Produtor
-    def producer_worker():
+    def producer_worker() -> None:
         try:
             # Callback insere diretamente na fila DLQ
-            def dlq_cb(msg: str):
+            def dlq_cb(msg: str) -> None:
                 dlq_queue.put(msg)
                 
             for line_number, record, byte_offset in read_jsonl(input_path, stats, dlq_cb, start_offset):
@@ -177,7 +177,7 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
             input_queue.put(None)
 
     # Threads Consumidoras
-    def clubs_writer_worker():
+    def clubs_writer_worker() -> None:
         while True:
             item = clubs_queue.get()
             if item is None:
@@ -189,7 +189,7 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
             finally:
                 clubs_queue.task_done()
 
-    def players_writer_worker():
+    def players_writer_worker() -> None:
         while True:
             item = players_queue.get()
             if item is None:
@@ -201,7 +201,7 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
             finally:
                 players_queue.task_done()
 
-    def dlq_writer_worker():
+    def dlq_writer_worker() -> None:
         while True:
             item = dlq_queue.get()
             if item is None:

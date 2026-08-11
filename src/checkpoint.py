@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class CheckpointManager:
                 state = json.load(f)
                 
             if state.get("input_filepath") == input_filepath:
-                return state
+                return cast(Dict[str, Any], state)
             else:
                 logger.info("Checkpoint pertence a um arquivo diferente. Ignorando.")
                 return None

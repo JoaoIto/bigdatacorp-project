@@ -19,4 +19,4 @@ def format_date(date_str: Any) -> str:
     parts = date_str.split("-")
     if len(parts) == 3:
         return f"{parts[2]}/{parts[1]}/{parts[0]}"
-    return date_str
+    return str(date_str)
