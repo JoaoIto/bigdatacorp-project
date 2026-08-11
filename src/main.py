@@ -101,6 +101,11 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
     players_path = os.path.join(output_dir, "players.csv")
     dlq_path = os.path.join(output_dir, "dlq_errors.txt")
 
+    # Arquivos temporários para idempotência (escritas atômicas)
+    clubs_tmp = clubs_path + ".tmp"
+    players_tmp = players_path + ".tmp"
+    dlq_tmp = dlq_path + ".tmp"
+
     logger.info("Iniciando processamento...")
     logger.info("  Entrada:  %s", input_path)
     logger.info("  Saída:    %s", output_dir)
@@ -117,13 +122,13 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
         "erros_processamento": 0,
     }
 
-    # Abre os arquivos de saída e a Dead Letter Queue
-    clubs_fh, clubs_writer = create_csv_writer(clubs_path, CLUBS_HEADER)
-    players_fh, players_writer = create_csv_writer(players_path, PLAYERS_HEADER)
+    # Abre os arquivos de saída e a Dead Letter Queue como .tmp
+    clubs_fh, clubs_writer = create_csv_writer(clubs_tmp, CLUBS_HEADER)
+    players_fh, players_writer = create_csv_writer(players_tmp, PLAYERS_HEADER)
     dlq_fh: Optional[IO[str]] = None
     try:
         dlq_fh = open(
-            dlq_path, 'w',
+            dlq_tmp, 'w',
             encoding='utf-8',
             buffering=IO_BUFFER_SIZE,
         )
@@ -136,6 +141,8 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
     gc.disable()
     gc_collect = gc.collect  # Aliasing para LOAD_FAST
     GC_INTERVAL: int = 100_000
+
+    commit_success = False
 
     try:
         # ── Micro-otimização: LOAD_FAST em vez de LOAD_ATTR ──
@@ -186,15 +193,31 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
             # ── GC Determinístico: coleta Gen 0 a cada 100K linhas ──
             if stats["linhas_lidas"] % GC_INTERVAL == 0:
                 gc_collect(0)
+        # Se executou tudo sem exceção grave que escape do loop, commit final!
+        commit_success = True
 
     finally:
         # Reativa o Garbage Collector (ADR-008 — segurança)
         gc.enable()
-        # Garante fechamento dos arquivos mesmo em caso de erro
+        # Garante fechamento dos arquivos em qualquer cenário
         clubs_fh.close()
         players_fh.close()
         if dlq_fh is not None:
             dlq_fh.close()
+            
+        # ── Idempotência: Escritas Atômicas ──
+        # Se sucesso, move os arquivos .tmp para o destino final (overwrites)
+        if commit_success:
+            os.replace(clubs_tmp, clubs_path)
+            os.replace(players_tmp, players_path)
+            # Se a DLQ estiver vazia (zero erros), podemos mantê-la vazia ou apenas renomear
+            if os.path.exists(dlq_tmp):
+                os.replace(dlq_tmp, dlq_path)
+        else:
+            # Em caso de aborto (ex: kill ou exception grave), deleta o lixo
+            for tmp_file in (clubs_tmp, players_tmp, dlq_tmp):
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
 
     return stats
 

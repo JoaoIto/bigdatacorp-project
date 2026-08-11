@@ -114,4 +114,7 @@ Linhas rejeitadas (JSON malformado, tipo inesperado) **não são mais descartada
 ```
 Isso permite que a equipe de Data Quality inspecione, quantifique e reprocesse os dados corrompidos.
 
+### 5. Escritas Atômicas (Idempotência)
+Em sistemas distribuídos, falhas no meio do pipeline não podem deixar os arquivos de destino corrompidos pela metade. Para atingir **Idempotência**, o processador grava todos os resultados em arquivos temporários (`.tmp`). Somente se todo o pipeline finalizar com sucesso, uma syscall `os.replace` (operação atômica em POSIX/NTFS) renomeia instantaneamente os arquivos para `.csv`. Em caso de erro fatal abortivo (ex: container morrendo por disco cheio), o `finally` varre os buffers residuais temporários, mantendo a base final limpa para re-execuções.
+
 > A documentação aprofundada de requisitos, logs da Inteligência Artificial par (Auditoria) e o diário de ADRs (Architecture Decision Records) residem fora do repositório de código, na pasta `/spec`.
