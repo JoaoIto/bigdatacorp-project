@@ -18,6 +18,8 @@ from typing import Any, List, TextIO, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Buffer de 256 KB para reduzir syscalls de I/O (ADR-008)
+IO_BUFFER_SIZE: int = 262144
 
 
 def create_csv_writer(filepath: str, header: List[str]) -> Tuple[TextIO, Any]:
@@ -34,6 +36,10 @@ def create_csv_writer(filepath: str, header: List[str]) -> Tuple[TextIO, Any]:
     IMPORTANTE: O arquivo é aberto com newline='' conforme exigido pela
     documentação do módulo csv do Python. Isso evita a duplicação de \\r
     no Windows (\\r\\r\\n), pois o csv.writer já insere \\r\\n.
+
+    O buffer de I/O é configurado em 256 KB (ADR-008) para reduzir
+    chamadas de sistema write() ao kernel do SO, otimizando throughput
+    em discos de rede (NFS, EFS, CIFS).
 
     Args:
         filepath (str): Caminho do arquivo CSV de saída.
@@ -54,7 +60,12 @@ def create_csv_writer(filepath: str, header: List[str]) -> Tuple[TextIO, Any]:
         >>> writer.writerow(['SCCP', 'Corinthians', ...])
         >>> fh.close()
     """
-    file_handle = open(filepath, 'w', newline='', encoding='utf-8')
+    file_handle = open(
+        filepath, 'w',
+        newline='',
+        encoding='utf-8',
+        buffering=IO_BUFFER_SIZE,
+    )
     writer = csv.writer(file_handle)
 
     # Escreve o cabeçalho como primeira linha do CSV

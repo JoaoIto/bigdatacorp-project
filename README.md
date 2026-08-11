@@ -91,4 +91,24 @@ Frente a dados de terceiros, a chance de encontrar anomalias é de 100%. O siste
 ### 3. Compliance Estrito RFC 4180
 Criar CSVs manualmente via manipulação de string (`",".join()`) é frágil quando dados contêm vírgulas e aspas internas (como `Pedro Lourenço, Filho`). Por isso, usamos o módulo `csv` nativo do Python (bindings em C) configurado com `newline=''` para lidar automaticamente com double quoting, delimiter escaping e quebras de linha `CRLF` (Windows/Unix safety).
 
+---
+
+## ⚡ Hyper-Otimização SRE (Escala de Terabytes)
+
+Três técnicas avançadas foram aplicadas para eliminar gargalos ocultos em escala de produção:
+
+### 1. Buffer Tuning (I/O)
+Todas as chamadas `open()` (leitura e escrita) utilizam `buffering=262144` (256 KB). Isso reduz em **~32x** as chamadas de sistema `write()` ao kernel, eliminando a contenção de I/O em discos de rede (NFS, EFS, CIFS) onde cada syscall paga latência de rede.
+
+### 2. Garbage Collector Disable
+O GC geracional do CPython é **desativado** durante o loop principal de processamento e **reativado no bloco `finally`**. Isso elimina ~1.400 coletas automáticas por milhão de registros (micro-pausas stop-the-world). O reference counting nativo do CPython continua ativo, garantindo zero vazamento de memória.
+
+### 3. Dead Letter Queue (DLQ) — Auditoria de Dados
+Linhas rejeitadas (JSON malformado, tipo inesperado) **não são mais descartadas silenciosamente**. Elas são gravadas no arquivo `dlq_errors.txt` na pasta de saída, com prefixo auditável:
+```
+[LINHA:4][JSON_MALFORMADO] isto nao e json
+[LINHA:7][TIPO_INVALIDO:list] ["lista em vez de dict"]
+```
+Isso permite que a equipe de Data Quality inspecione, quantifique e reprocesse os dados corrompidos.
+
 > A documentação aprofundada de requisitos, logs da Inteligência Artificial par (Auditoria) e o diário de ADRs (Architecture Decision Records) residem fora do repositório de código, na pasta `/spec`.

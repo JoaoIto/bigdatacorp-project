@@ -14,13 +14,14 @@ Uso:
 Referência arquitetural: spec/architecture.md §2 e §3
 """
 
+import gc
 import json
 import logging
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, IO, Optional
 
-from reader import read_jsonl
+from reader import read_jsonl, IO_BUFFER_SIZE
 from transformer import (
     CLUBS_HEADER,
     PLAYERS_HEADER,
@@ -82,6 +83,13 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
       3. Transformer: aplica regras de negócio (datas, cores, campos nulos).
       4. Writer: escreve imediatamente nos CSVs (streaming O(1)).
 
+    Otimizações de performance (ADR-008):
+      - Buffer de I/O de 256 KB em todos os file handles.
+      - Garbage Collector desativado durante o loop principal.
+
+    Auditoria de dados (ADR-009):
+      - Linhas rejeitadas são gravadas em dlq_errors.txt na pasta de output.
+
     Args:
         input_path (str): Caminho para o arquivo JSONL de entrada.
         output_dir (str): Diretório onde os CSVs serão escritos.
@@ -91,29 +99,43 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
     """
     clubs_path = os.path.join(output_dir, "clubs.csv")
     players_path = os.path.join(output_dir, "players.csv")
+    dlq_path = os.path.join(output_dir, "dlq_errors.txt")
 
     logger.info("Iniciando processamento...")
     logger.info("  Entrada:  %s", input_path)
     logger.info("  Saída:    %s", output_dir)
 
     # Contadores compartilhados com o reader (via dict mutável)
-    stats = {
+    stats: Dict[str, int] = {
         "linhas_lidas": 0,
         "linhas_vazias": 0,
         "linhas_json_invalido": 0,
+        "linhas_dlq": 0,
         "clubes_filtrados": 0,
         "clubes_escritos": 0,
         "jogadores_escritos": 0,
         "erros_processamento": 0,
     }
 
-    # Abre os dois arquivos de saída
+    # Abre os arquivos de saída e a Dead Letter Queue
     clubs_fh, clubs_writer = create_csv_writer(clubs_path, CLUBS_HEADER)
     players_fh, players_writer = create_csv_writer(players_path, PLAYERS_HEADER)
+    dlq_fh: Optional[IO[str]] = None
+    try:
+        dlq_fh = open(
+            dlq_path, 'w',
+            encoding='utf-8',
+            buffering=IO_BUFFER_SIZE,
+        )
+    except OSError:
+        logger.warning("Não foi possível criar arquivo DLQ: %s", dlq_path)
+
+    # Desativa o Garbage Collector durante o hot loop (ADR-008)
+    gc.disable()
 
     try:
         # Pipeline: Reader (generator) → Filter → Transform → Writer
-        for line_number, record in read_jsonl(input_path, stats):
+        for line_number, record in read_jsonl(input_path, stats, dlq_fh):
             try:
                 # ── RN01: Filtro por campeonato ──
                 if not is_valid_championship(record):
@@ -148,9 +170,13 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
                 continue
 
     finally:
+        # Reativa o Garbage Collector (ADR-008 — segurança)
+        gc.enable()
         # Garante fechamento dos arquivos mesmo em caso de erro
         clubs_fh.close()
         players_fh.close()
+        if dlq_fh is not None:
+            dlq_fh.close()
 
     return stats
 
@@ -166,6 +192,7 @@ def print_report(stats: Dict[str, int]) -> None:
     logger.info("  Linhas lidas:              %d", stats.get("linhas_lidas", 0))
     logger.info("  Linhas vazias ignoradas:   %d", stats.get("linhas_vazias", 0))
     logger.info("  Linhas JSON inválido:      %d", stats.get("linhas_json_invalido", 0))
+    logger.info("  Linhas DLQ (auditoria): %d", stats.get("linhas_dlq", 0))
     logger.info("  Clubes filtrados:          %d", stats.get("clubes_filtrados", 0))
     logger.info("  Erros de processamento:    %d", stats.get("erros_processamento", 0))
     logger.info("  Clubes escritos:           %d", stats.get("clubes_escritos", 0))
