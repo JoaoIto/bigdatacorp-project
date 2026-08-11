@@ -80,6 +80,11 @@ def read_jsonl(
         errors='replace',
         buffering=IO_BUFFER_SIZE,
     ) as f:
+        # ── Micro-otimização: LOAD_FAST em vez de LOAD_ATTR ──
+        # Aliasing de funções frequentes para variáveis locais reduz
+        # lookups de atributo no hot loop (cada chamada evita 1 LOAD_ATTR).
+        _parse_json = json.loads
+
         for line_number, raw_line in enumerate(f, start=1):
             stats['linhas_lidas'] += 1
 
@@ -91,7 +96,7 @@ def read_jsonl(
 
             # ── Nível 2: JSON malformado ──
             try:
-                record = json.loads(stripped)
+                record = _parse_json(stripped)
             except json.JSONDecodeError as e:
                 logger.warning(
                     "Linha %d: JSON malformado — %s",

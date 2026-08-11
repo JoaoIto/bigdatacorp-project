@@ -131,31 +131,45 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
         logger.warning("Não foi possível criar arquivo DLQ: %s", dlq_path)
 
     # Desativa o Garbage Collector durante o hot loop (ADR-008)
+    # Coleta determinística da Gen 0 a cada 100K linhas substitui as
+    # ~1.400 coletas automáticas por milhão de registros.
     gc.disable()
+    gc_collect = gc.collect  # Aliasing para LOAD_FAST
+    GC_INTERVAL: int = 100_000
 
     try:
+        # ── Micro-otimização: LOAD_FAST em vez de LOAD_ATTR ──
+        # Aliasing de funções frequentes para variáveis locais reduz
+        # lookups de atributo no hot loop (cada chamada evita 1 LOAD_ATTR).
+        _is_valid = is_valid_championship
+        _transform_club = transform_club
+        _transform_player = transform_player
+        _safe_str = safe_str
+        _write_club = clubs_writer.writerow
+        _write_player = players_writer.writerow
+
         # Pipeline: Reader (generator) → Filter → Transform → Writer
         for line_number, record in read_jsonl(input_path, stats, dlq_fh):
             try:
                 # ── RN01: Filtro por campeonato ──
-                if not is_valid_championship(record):
+                if not _is_valid(record):
                     stats["clubes_filtrados"] += 1
                     continue
 
                 # ── Transformar e escrever o clube (1:1) ──
-                club_row = transform_club(record)
-                clubs_writer.writerow(club_row)
+                club_row = _transform_club(record)
+                _write_club(club_row)
                 stats["clubes_escritos"] += 1
 
                 # ── Transformar e escrever cada jogador (1:N) ──
-                club_id = safe_str(record, "club_id")
+                club_id = _safe_str(record, "club_id")
                 players = record.get("players")
 
                 if isinstance(players, list):
                     for player in players:
                         if isinstance(player, dict):
-                            player_row = transform_player(club_id, player)
-                            players_writer.writerow(player_row)
+                            player_row = _transform_player(club_id, player)
+                            _write_player(player_row)
                             stats["jogadores_escritos"] += 1
 
             except Exception as e:
@@ -168,6 +182,10 @@ def process(input_path: str, output_dir: str) -> Dict[str, int]:
                 )
                 stats["erros_processamento"] += 1
                 continue
+
+            # ── GC Determinístico: coleta Gen 0 a cada 100K linhas ──
+            if stats["linhas_lidas"] % GC_INTERVAL == 0:
+                gc_collect(0)
 
     finally:
         # Reativa o Garbage Collector (ADR-008 — segurança)

@@ -100,10 +100,13 @@ Três técnicas avançadas foram aplicadas para eliminar gargalos ocultos em esc
 ### 1. Buffer Tuning (I/O)
 Todas as chamadas `open()` (leitura e escrita) utilizam `buffering=262144` (256 KB). Isso reduz em **~32x** as chamadas de sistema `write()` ao kernel, eliminando a contenção de I/O em discos de rede (NFS, EFS, CIFS) onde cada syscall paga latência de rede.
 
-### 2. Garbage Collector Disable
-O GC geracional do CPython é **desativado** durante o loop principal de processamento e **reativado no bloco `finally`**. Isso elimina ~1.400 coletas automáticas por milhão de registros (micro-pausas stop-the-world). O reference counting nativo do CPython continua ativo, garantindo zero vazamento de memória.
+### 2. GC Determinístico (Gen 0)
+O GC geracional do CPython é **desativado** antes do processamento (`gc.disable()`). Em vez de deixá-lo pausar a aplicação aleatoriamente a cada 700 alocações, o pipeline força uma coleta limpa apenas da Geração 0 (objetos efêmeros recém-criados) a cada exatas **100.000 linhas processadas** via `gc.collect(generation=0)`. No bloco `finally`, o GC é religado. Isso garante latência de CPU extremamente previsível e alto throughput.
 
-### 3. Dead Letter Queue (DLQ) — Auditoria de Dados
+### 3. Micro-otimizações de Bytecode (Local Variable Aliasing)
+Para o hot-loop que processa milhões de registros, foi implementado o aliasing de funções globais ou de instância para variáveis locais (ex: `_parse_json = json.loads`). Isso força a máquina virtual do CPython (eval loop) a usar a instrução otimizada `LOAD_FAST` ao invés da custosa `LOAD_ATTR`, removendo a sobrecarga de lookup de atributos de dicionários em cada iteração. Adicionalmente, funções de conversão de dados massivamente repetitivas utilizam `@lru_cache` para evitar recomputação contínua.
+
+### 4. Dead Letter Queue (DLQ) — Auditoria de Dados
 Linhas rejeitadas (JSON malformado, tipo inesperado) **não são mais descartadas silenciosamente**. Elas são gravadas no arquivo `dlq_errors.txt` na pasta de saída, com prefixo auditável:
 ```
 [LINHA:4][JSON_MALFORMADO] isto nao e json

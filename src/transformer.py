@@ -19,8 +19,9 @@ Referências:
   spec/decisions.md ADR-005 (Normalização de championship)
 """
 
+import functools
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # ──────────────────────────────────────────────────────────────
 # Constantes
@@ -174,6 +175,14 @@ def format_date(value: Any) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=256)
+def _format_colors_cached(colors: Tuple[str, ...]) -> str:
+    """Função interna com memoization (cache) para strings de cores.
+    Espera receber uma tupla de strings (que é hashável).
+    """
+    return "|".join(colors)
+
+
 def format_colors(colors: Any) -> str:
     """Une uma lista de cores em um campo separado por pipe '|' (RN03).
 
@@ -203,13 +212,13 @@ def format_colors(colors: Any) -> str:
     if not colors or not isinstance(colors, list):
         return ""
 
-    # Filtra elementos None ou não-string da lista
-    valid_colors = [str(c) for c in colors if c is not None]
-
-    if not valid_colors:
+    # Filtra elementos None e converte para tupla de strings para o cache
+    colors_tuple = tuple(str(c) for c in colors if c is not None)
+    
+    if not colors_tuple:
         return ""
-
-    return "|".join(valid_colors)
+        
+    return _format_colors_cached(colors_tuple)
 
 
 # ──────────────────────────────────────────────────────────────
